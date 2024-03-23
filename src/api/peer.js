@@ -9,11 +9,17 @@
  * @license     LGPL-3.0
  */
 
+// external dependencies
 /* global Pear */
 import b4a from 'b4a'
 import Corestore from 'corestore'
 import Hyperswarm from 'hyperswarm'
+
+// internal dependencies
 import Logger from './log'
+import Consumer from './consumer'
+
+// configuration imports
 import config from '../../config/default.json'
 
 export default class Peer {
@@ -25,16 +31,12 @@ export default class Peer {
   /**
    *
    */
-  constructor() {
-    // Assign log level from config
-    const logLevel = config.debug
-      ? 'debug'
-      : (config.quiet ? 'error' : 'info')
-
+  constructor(networkKey) {
     // Initializes a logger instance
     this.logger = new Logger({
       label: `Peer`,
-      level: logLevel
+      debug: config.debug,
+      quiet: config.quiet,
     })
 
     this.logger.info(`Starting Vaults v${config.version}`)
@@ -42,16 +44,26 @@ export default class Peer {
     // Initializes peer functionality
     this.swarm = new Hyperswarm()
     this.store = new Corestore(this.dataPath)
+    this.consumer = new Consumer()
 
-    // booted = built/configured/prepared
+    // Initialize a session by name (writable)
+    this.storeConf = { name: 'vaults', valueEncoding: 'json' }
+
+    // If we have a network key, initialize by key
+    if (networkKey !== null && networkKey.length === 32) {
+      this.storeConf = { key: networkKey, valueEncoding: 'json' }
+    }
+
+    // Booted means built/configured/prepared
     this.booted  = true
     this.bootedAt = new Date().valueOf()
 
-    // started = ready
+    // Started means ready
     this.started = false
     this.startedAt = null
 
-    this.appstore = null
+    // Empty properties
+    this.vaults = null
     this.peers = new Map()
     this.publicKeys = new Map()
   }
@@ -60,6 +72,9 @@ export default class Peer {
    *
    */
   async _teardown() {
+    this.destroying = true
+
+    // Destroy the Hyperswarm instance
     this.swarm.destroy()
   }
 
@@ -72,22 +87,24 @@ export default class Peer {
     Pear.teardown(() => this._teardown())
 
     // Starts the main store
-    this.appstore = this.store.get({ name: 'vaults', valueEncoding: 'json' })
-    await this.appstore.ready()
+    this.vaults = this.store.get(this.storeConf)
+    await this.vaults.ready()
 
     // Save the created pair of keys
-    this.publicKeys.set('vaults', this.appstore.key)
-    this.publicKeys.set('discovery', this.appstore.discoveryKey)
+    this.publicKeys.set('self', this.swarm.keyPair.publicKey)
+    this.publicKeys.set('vaults', this.vaults.key)
+    this.publicKeys.set('discovery', this.vaults.discoveryKey)
 
     // Useful log of runtime results
-    this.logger.info(`Vaults main core key => ${b4a.toString(this.appstore.key, 'hex')}`)
-    this.logger.info(`Vaults discovery key => ${b4a.toString(this.appstore.discoveryKey, 'hex')}`)
+    this.logger.info(`Vaults main core key => ${b4a.toString(this.publicKeys.get('vaults'), 'hex')}`)
+    this.logger.info(`Vaults discovery key => ${b4a.toString(this.publicKeys.get('discovery'), 'hex')}`)
+    this.logger.info(`Peer node public key => ${b4a.toString(this.publicKeys.get('self'), 'hex')}`)
 
     // Join the swarm using the discovery key
-    this.swarm.join(this.appstore.discoveryKey)
+    this.swarm.join(this.vaults.discoveryKey)
 
     // Handle networking, messages and replication
-    this.swarm.on('connection', (conn) => {
+    this.swarm.on('connection', (conn/* : NoiseSecretStream */) => {
       // Print connection information
       const publicKey = b4a.toString(conn.remotePublicKey, 'hex')
       this.logger.info(`* Connection established with ${publicKey}`)
@@ -96,25 +113,35 @@ export default class Peer {
       this.peers.set(publicKey, conn)
 
       // Handle incoming messages (operations)
-      conn.on('data', data => this.logger.debug(`Intercepted call data: ${JSON.stringify(data)}`))
+      conn.on('data', data => this.consume(conn, data))
 
       // Handle disconnection and errors from client
       conn.once('close', () => {
+        if (this.destroying) {
+          return;
+        }
+
         this.logger.info(`! Connection closed with ${publicKey}`)
         this.peers.delete(publicKey)
       })
 
-      conn.on('error', e => this.logger.error(`Connection error: ${e}`))
+      conn.on('error', e => {
+        if (! /Error: connection reset by peer/.test(e))
+          this.logger.error(`Connection error: ${e}`)
+      })
 
       // Replicate every loaded core (discovery)
-      this.appstore.replicate(conn)
+      this.vaults.replicate(conn)
     })
+
+    // Talk to neighbours and update hypercore
+    await this.swarm.flush()
+    await this.vaults.update()
 
     // Bootstrap done, node is now ready
     this.started = true
     this.startedAt = new Date().valueOf()
 
-    this.logger.info(`Your node public key => ${b4a.toString(this.swarm.keyPair.publicKey, 'hex')}`)
     this.logger.debug(`Vaults application startup took ${this.startedAt - this.bootedAt}ms`)
   }
 
@@ -136,5 +163,27 @@ export default class Peer {
     // Debug timing information
     const endedAt = new Date().valueOf()
     this.logger.debug(`Broadcasting to all peers took ${endedAt - startedAt}ms`)
+  }
+
+  /**
+   *
+   */
+  consume(socket, data)
+  {
+    // Nothing to do with empty dataset
+    if (data === undefined || !data.length) {
+      return ;
+    }
+
+    // Determine the initiator using the socket
+    const initiatorPubKey = socket.remotePublicKey
+
+    // No need to handle data if we are the initiator
+    if (initiatorPubKey.equals(this.publicKeys.get('self'))) {
+      return ;
+    }
+
+    // Use consumer to interpret the message(s)
+    return this.consumer.handle(initiatorPubKey, data)
   }
 }

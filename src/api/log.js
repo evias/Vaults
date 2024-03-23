@@ -31,9 +31,16 @@ export default class Logger {
    *
    */
   constructor(opts) {
+    this._EOL   = !!opts ? (opts.EOL ?? '\n') : '\n'
     this._label = !!opts ? opts.label : null
     this._level = !!opts ? opts.level : null
-    this._EOL   = !!opts ? (opts.EOL ?? '\n') : '\n'
+
+    // Uses "debug" and "quiet" to determine level
+    if (!!opts && null === this._level) {
+      this._level = opts.debug
+        ? 'debug'
+        : (opts.quiet ? 'error' : 'info')
+    }
 
     if (! fs.existsSync(this.logsPath)) {
       fs.mkdirSync(this.logsPath)
@@ -66,7 +73,8 @@ export default class Logger {
       return ;
 
     // prepare additional information
-    const format = `${this.timestamp()} [${this.label()}] ${level.toUpperCase()}: ${message}`
+    const padLevel = level.toUpperCase().padStart('DEBUG'.length, ' ')
+    const format = `${this.timestamp()} [${this.label()}] ${padLevel}: ${message}`
 
     if (opts !== undefined) {
       console.log(format, opts)

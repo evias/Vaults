@@ -15,9 +15,12 @@
     "type": "terminal"
   },
   "scripts": {
-    "dev": "pear dev",
+    "dev": "pear dev .",
     "test": "brittle test/*.test.js",
-    "start": "pear dev -s /tmp/vaults"
+    "start": "pear dev -s /tmp/vaults .",
+    "start:node-1": "pear dev -s /tmp/vaults_1 .",
+    "start:node-2": "pear dev -s /tmp/vaults_2 .",
+    "start:node-3": "pear dev -s /tmp/vaults_3 ."
   },
   "devDependencies": {
     "brittle": "^3.0.0"
